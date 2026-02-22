@@ -113,15 +113,14 @@ def _fuzzy_match(
     """
     from rapidfuzz import fuzz, process
 
-    # Filter to same position and approximate draft year
+    # Filter to same position and approximate draft year (±1 year tolerance).
+    # Do NOT relax to all years — that would match old draft classes against
+    # recent CFB prospects and produce garbage links.
     filtered = [
         c for c in candidates
         if c["position"] == position
         and (draft_year is None or abs((c["draft_year"] or 0) - (draft_year or 0)) <= 1)
     ]
-    if not filtered:
-        # Relax: try all candidates of the same position
-        filtered = [c for c in candidates if c["position"] == position]
     if not filtered:
         return []
 
@@ -160,26 +159,33 @@ def main() -> None:
     cfb_candidates = _load_cfb_candidates(cfb_db_path)
     all_candidates: list[dict] = [c for v in cfb_candidates.values() for c in v]
 
-    # Load unique NFL players needing a link
-    with get_session(db_path) as session:
-        rows = session.query(NFLPlayerSeason).all()
-
-    # Deduplicate: one match attempt per (name, position, draft_year)
+    # Load unique NFL players — deduplicate by (name, position).
+    # Track earliest season_year per player as estimated draft_year when
+    # draft_year hasn't been populated yet (avoids year-unfiltered fuzzy matches
+    # against wrong draft classes).
     unique: dict[tuple, dict] = {}
-    for r in rows:
-        # Estimate draft year from first NFL season (approximately draft_year = first_season)
-        # This will be refined after matching
-        key = (r.player_name, r.position, r.draft_year)
-        if key not in unique:
-            unique[key] = {
-                "player_name": r.player_name,
-                "position": r.position,
-                "draft_year": r.draft_year,
-                "fantasy_ppg": r.fantasy_ppg,
-                "season_year": r.season_year,
-            }
+    with get_session(db_path) as session:
+        for r in session.query(NFLPlayerSeason).all():
+            key = (r.player_name, r.position)
+            if key not in unique:
+                unique[key] = {
+                    "player_name": r.player_name,
+                    "position": r.position,
+                    "draft_year": r.draft_year,
+                    "fantasy_ppg": r.fantasy_ppg,
+                    "season_year": r.season_year,
+                    "min_season_year": r.season_year,
+                }
+            else:
+                # Keep the earliest season year seen — best proxy for draft year
+                if r.season_year and (unique[key]["min_season_year"] is None
+                                      or r.season_year < unique[key]["min_season_year"]):
+                    unique[key]["min_season_year"] = r.season_year
+                # Prefer non-null draft_year if we have it
+                if r.draft_year and unique[key]["draft_year"] is None:
+                    unique[key]["draft_year"] = r.draft_year
 
-    logger.info("Attempting to link %d unique (player, position, draft_year) combos...",
+    logger.info("Attempting to link %d unique (player, position) combos...",
                 len(unique))
 
     exact_count = fuzzy_count = ambiguous_count = missing_count = 0
@@ -189,12 +195,15 @@ def main() -> None:
 
     pos_candidates = dict(cfb_candidates)
 
-    for (name, pos, draft_year), info in unique.items():
+    for (name, pos), info in unique.items():
         if not pos or pos not in ("WR", "RB", "TE"):
             continue
         candidates_for_pos = pos_candidates.get(pos, [])
 
-        matches = _fuzzy_match(name, draft_year, pos, candidates_for_pos, args.threshold)
+        # Use draft_year if populated; otherwise fall back to earliest season year.
+        # This ensures year-based filtering works even for un-linked players.
+        effective_draft_year = info["draft_year"] or info.get("min_season_year")
+        matches = _fuzzy_match(name, effective_draft_year, pos, candidates_for_pos, args.threshold)
 
         if not matches:
             missing_count += 1
@@ -209,7 +218,7 @@ def main() -> None:
             ambiguous_count += 1
             collisions.append({
                 "nfl_player_name": name,
-                "draft_year": draft_year,
+                "draft_year": info["draft_year"],
                 "position": pos,
                 "candidate_1_name": matches[0][0]["full_name"],
                 "candidate_1_id": matches[0][0]["player_id"],
@@ -227,9 +236,12 @@ def main() -> None:
         else:
             fuzzy_count += 1
 
+        # Use the NFLDraftPick year from the matched CFB record as the authoritative
+        # draft_year — this is what back-fills draft_year on NFLPlayerSeason rows.
+        resolved_draft_year = info["draft_year"] or best.get("draft_year")
         links.append({
             "nfl_player_name": name,
-            "draft_year": draft_year,
+            "draft_year": resolved_draft_year,
             "position": pos,
             "cfb_player_id": best["player_id"],
             "cfb_full_name": best["full_name"],
@@ -247,7 +259,7 @@ def main() -> None:
         fuzzy_only = [l for l in links if l["match_method"] == "fuzzy"]
         fuzzy_only.sort(key=lambda x: x["match_score"])
         for l in fuzzy_only[:20]:
-            print(f"  {l['nfl_player_name']!r:30} → {l['cfb_full_name']!r:30} "
+            print(f"  {l['nfl_player_name']!r:30} -> {l['cfb_full_name']!r:30} "
                   f"(score={l['match_score']:.0f}, draft={l['draft_year']})")
         print(f"\nQA - Ambiguous ({len(collisions)} total):")
         for c in collisions[:10]:
@@ -263,17 +275,17 @@ def main() -> None:
                 session.query(CFBLink)
                 .filter(
                     CFBLink.nfl_player_name == l["nfl_player_name"],
-                    CFBLink.draft_year == l["draft_year"],
+                    CFBLink.position == l["position"],
                 )
                 .first()
             )
             if existing is None:
                 existing = CFBLink(
                     nfl_player_name=l["nfl_player_name"],
-                    draft_year=l["draft_year"],
                     position=l["position"],
                 )
                 session.add(existing)
+            existing.draft_year = l["draft_year"]
             existing.cfb_player_id = l["cfb_player_id"]
             existing.cfb_full_name = l["cfb_full_name"]
             existing.match_score = l["match_score"]

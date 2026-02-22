@@ -132,9 +132,12 @@ def main() -> None:
     logger.info("Computing B2S for draft classes %d-%d...",
                 args.min_draft_year, args.max_draft_year)
 
+    # Group by (player_name, position, draft_year) — convert to dicts inside
+    # session to avoid DetachedInstanceError after session closes.
+    from collections import defaultdict
+    groups: dict[tuple, list[dict]] = defaultdict(list)
     with get_session(db_path) as session:
-        # Load all rows that have a draft_year set
-        rows = (
+        for r in (
             session.query(NFLPlayerSeason)
             .filter(
                 NFLPlayerSeason.draft_year.isnot(None),
@@ -142,18 +145,13 @@ def main() -> None:
                 NFLPlayerSeason.draft_year <= args.max_draft_year,
             )
             .all()
-        )
-
-    # Group by (player_name, position, draft_year)
-    from collections import defaultdict
-    groups: dict[tuple, list[dict]] = defaultdict(list)
-    for r in rows:
-        key = (r.player_name, r.position, r.draft_year)
-        groups[key].append({
-            "season_year": r.season_year,
-            "games_played": r.games_played,
-            "fantasy_ppg": r.fantasy_ppg,
-        })
+        ):
+            key = (r.player_name, r.position, r.draft_year)
+            groups[key].append({
+                "season_year": r.season_year,
+                "games_played": r.games_played,
+                "fantasy_ppg": r.fantasy_ppg,
+            })
 
     results = []
     for (name, pos, dy), seasons in groups.items():

@@ -174,7 +174,9 @@ class CFBLink(Base):
 
     __tablename__ = "cfb_link"
     __table_args__ = (
-        UniqueConstraint("nfl_player_name", "draft_year", name="uq_cfb_link"),
+        # Player plays one position — unique per (name, position), not by draft_year
+        # (draft_year may be None initially and updated later without creating duplicates)
+        UniqueConstraint("nfl_player_name", "position", name="uq_cfb_link"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
