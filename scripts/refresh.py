@@ -11,7 +11,7 @@ Usage:
     python scripts/refresh.py --source seasons   # refresh one source only
     python scripts/refresh.py --years 2023 2024  # specific seasons only
 
-Sources: seasons, b2s, links, qa
+Sources: seasons, b2s, links, qa, bigboard
 """
 
 import argparse
@@ -36,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ALL_SOURCES = ["seasons", "b2s", "links", "qa"]
+ALL_SOURCES = ["seasons", "b2s", "links", "qa", "bigboard"]
 
 _NFLVERSE_PLAYER_STATS_TAG = "player_stats"
 _NFLVERSE_API = (
@@ -173,6 +173,11 @@ def refresh_qa(db_path: str) -> None:
     _run_script("qa_report.py", ["--db", db_path])
 
 
+def refresh_bigboard(db_path: str) -> None:
+    """Re-scrape nflmockdraftdatabase.com consensus big board (2016–present)."""
+    _run_script("populate_bigboard.py", ["--db", db_path, "--start-year", "2016"])
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -236,6 +241,10 @@ def main() -> None:
     if "qa" in sources:
         logger.info("=== QA report ===")
         refresh_qa(db_path)
+
+    if "bigboard" in sources:
+        logger.info("=== Consensus big board ===")
+        refresh_bigboard(db_path)
 
     logger.info("Done.")
 
