@@ -36,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ALL_SOURCES = ["seasons", "b2s", "links", "qa", "bigboard"]
+ALL_SOURCES = ["seasons", "gamelogs", "scores", "b2s", "links", "qa", "bigboard"]
 
 _NFLVERSE_PLAYER_STATS_TAG = "player_stats"
 _NFLVERSE_API = (
@@ -178,6 +178,17 @@ def refresh_bigboard(db_path: str) -> None:
     _run_script("populate_bigboard.py", ["--db", db_path, "--start-year", "2016"])
 
 
+def refresh_gamelogs(db_path: str, years: list[int]) -> None:
+    """Re-ingest nflverse weekly game logs with full scoring stats."""
+    year_args = ["--years"] + [str(y) for y in years]
+    _run_script("populate_game_logs.py", ["--db", db_path] + year_args)
+
+
+def refresh_scores(db_path: str) -> None:
+    """Recompute season fantasy scores for all scoring formats."""
+    _run_script("compute_scores.py", ["--db", db_path])
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -229,6 +240,14 @@ def main() -> None:
     if "seasons" in sources:
         logger.info("=== nflverse player seasons ===")
         refresh_seasons(db_path, args.years)
+
+    if "gamelogs" in sources:
+        logger.info("=== nflverse weekly game logs ===")
+        refresh_gamelogs(db_path, args.years)
+
+    if "scores" in sources:
+        logger.info("=== fantasy score computation ===")
+        refresh_scores(db_path)
 
     if "links" in sources:
         logger.info("=== CFB link matching ===")

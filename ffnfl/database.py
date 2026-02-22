@@ -17,6 +17,19 @@ nfl_big_board
     Consensus pre-draft big board rankings.
     One row per (player_name, draft_year).
 
+scoring_formats
+    Named fantasy scoring templates (PPR, half-PPR, standard, custom).
+    Rules stored as a JSON string. See ScoringFormat.make_rules().
+
+nfl_player_game_logs
+    Weekly (per-game) raw counting stats from nflverse player_stats.
+    Includes all fields needed to compute custom scoring formats:
+    passing, rushing, receiving, 2-pt conversions, fumbles, special teams TDs.
+
+nfl_player_season_scores
+    Computed season fantasy points per (player, season, scoring format).
+    Derived from nfl_player_game_logs by scripts/compute_scores.py.
+
 cfb_link
     Fuzzy-matched link from NFL player name → cfb-prospect-db player_id.
     Enables joining NFL outcomes back to college features.
@@ -28,6 +41,7 @@ qa_missing_draft
     QA: players with NFL seasons but no draft record matched.
 """
 
+import json
 from contextlib import contextmanager
 from typing import Generator
 
@@ -36,6 +50,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -195,6 +210,199 @@ class CFBLink(Base):
         return (
             f"<CFBLink {self.nfl_player_name!r} → "
             f"{self.cfb_full_name!r} score={self.match_score}>"
+        )
+
+
+class ScoringFormat(Base):
+    """
+    Named fantasy scoring format.
+
+    Rules are stored as JSON with the following keys (all numeric):
+
+      pass_yards_per_point  yards needed per 1 fantasy point (e.g. 25)
+      pass_td               points per passing TD
+      pass_2pt              points per passing 2-pt conversion
+      interception          points per interception (negative, e.g. -2 or -3)
+
+      rush_yards_per_point  yards needed per 1 fantasy point (e.g. 10)
+      rush_td               points per rushing TD
+      rush_2pt              points per rushing 2-pt conversion
+
+      reception             points per reception (0=std, 0.5=half-PPR, 1.0=PPR)
+      rec_yards_per_point   yards needed per 1 fantasy point (e.g. 10)
+      rec_td                points per receiving TD
+      rec_2pt               points per receiving 2-pt conversion
+      te_rec_bonus          extra points per TE reception (0=none, 1.0=TE premium)
+
+      fumble_lost           points per fumble lost (negative)
+      special_teams_td      points per special teams TD
+      fumble_recovery_td    points per fumble recovery TD
+
+    Use ScoringFormat.parse_rules() to get a dict, and apply_rules() to score a row.
+    """
+
+    __tablename__ = "scoring_formats"
+    __table_args__ = (UniqueConstraint("name", name="uq_scoring_format_name"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)    # e.g. "ppr", "half_ppr", "dynasty"
+    description = Column(Text)
+    rules = Column(Text, nullable=False)     # JSON string
+
+    def parse_rules(self) -> dict:
+        return json.loads(self.rules)
+
+    @staticmethod
+    def compute_points(stats: dict, rules: dict, position: str) -> float:
+        """
+        Apply *rules* to a *stats* dict and return fantasy points.
+
+        *stats* keys match NFLPlayerGameLog column names.
+        *position* is needed for TE reception bonus.
+        """
+        r = rules
+        pts = 0.0
+
+        # Passing
+        pts += (stats.get("pass_yards") or 0) / r.get("pass_yards_per_point", 25)
+        pts += (stats.get("pass_tds") or 0)   * r.get("pass_td", 6)
+        pts += (stats.get("pass_2pt") or 0)   * r.get("pass_2pt", 2)
+        pts += (stats.get("interceptions") or 0) * r.get("interception", -2)
+
+        # Rushing
+        pts += (stats.get("rush_yards") or 0) / r.get("rush_yards_per_point", 10)
+        pts += (stats.get("rush_tds") or 0)   * r.get("rush_td", 6)
+        pts += (stats.get("rush_2pt") or 0)   * r.get("rush_2pt", 2)
+
+        # Receiving
+        recs = stats.get("receptions") or 0
+        pts += recs                            * r.get("reception", 1.0)
+        pts += (stats.get("rec_yards") or 0)  / r.get("rec_yards_per_point", 10)
+        pts += (stats.get("rec_tds") or 0)    * r.get("rec_td", 6)
+        pts += (stats.get("rec_2pt") or 0)    * r.get("rec_2pt", 2)
+
+        # TE reception bonus (applied on top of standard PPR points)
+        if position == "TE":
+            pts += recs * r.get("te_rec_bonus", 0.0)
+
+        # Miscellaneous
+        fumbles = (
+            (stats.get("rushing_fumbles_lost") or 0)
+            + (stats.get("receiving_fumbles_lost") or 0)
+            + (stats.get("sack_fumbles_lost") or 0)
+        )
+        pts += fumbles * r.get("fumble_lost", -2)
+        pts += (stats.get("special_teams_tds") or 0) * r.get("special_teams_td", 6)
+
+        return round(pts, 3)
+
+    def __repr__(self) -> str:
+        return f"<ScoringFormat name={self.name!r}>"
+
+
+class NFLPlayerGameLog(Base):
+    """
+    Per-game (weekly) raw counting stats from nflverse player_stats.
+
+    One row per (nflverse_id, season_year, week). Covers all counting
+    stats needed to compute custom fantasy scoring formats. Populated by
+    scripts/populate_game_logs.py.
+    """
+
+    __tablename__ = "nfl_player_game_logs"
+    __table_args__ = (
+        UniqueConstraint(
+            "nflverse_id", "season_year", "week",
+            name="uq_game_log",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Identity
+    player_name = Column(String, nullable=False)
+    nflverse_id = Column(String, nullable=False)
+    position = Column(String)
+    nfl_team = Column(String)
+    season_year = Column(Integer, nullable=False)
+    week = Column(Integer, nullable=False)
+
+    # Passing
+    completions = Column(Integer)
+    pass_attempts = Column(Integer)
+    pass_yards = Column(Integer)
+    pass_tds = Column(Integer)
+    interceptions = Column(Integer)
+    pass_2pt = Column(Integer)           # passing_2pt_conversions in nflverse
+    sack_fumbles_lost = Column(Integer)
+
+    # Rushing
+    rush_attempts = Column(Integer)
+    rush_yards = Column(Integer)
+    rush_tds = Column(Integer)
+    rush_2pt = Column(Integer)           # rushing_2pt_conversions in nflverse
+    rushing_fumbles_lost = Column(Integer)
+
+    # Receiving
+    targets = Column(Integer)
+    receptions = Column(Integer)
+    rec_yards = Column(Integer)
+    rec_tds = Column(Integer)
+    rec_2pt = Column(Integer)            # receiving_2pt_conversions in nflverse
+    receiving_fumbles_lost = Column(Integer)
+
+    # Miscellaneous
+    special_teams_tds = Column(Integer)
+
+    # nflverse pre-computed scores (for spot-checking)
+    fantasy_points_std = Column(Float)   # nflverse standard (no PPR)
+    fantasy_points_ppr = Column(Float)   # nflverse full PPR
+
+    def __repr__(self) -> str:
+        return (
+            f"<NFLPlayerGameLog {self.player_name!r} "
+            f"{self.season_year} wk{self.week}>"
+        )
+
+
+class NFLPlayerSeasonScore(Base):
+    """
+    Computed season fantasy points per (player, season, scoring format).
+
+    Derived from nfl_player_game_logs by scripts/compute_scores.py.
+    One row per (nflverse_id, season_year, format_id).
+
+    For players who changed teams mid-season, nfl_team shows the team
+    with the most games played that season.
+    """
+
+    __tablename__ = "nfl_player_season_scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "nflverse_id", "season_year", "format_id",
+            name="uq_season_score",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    player_name = Column(String, nullable=False)
+    nflverse_id = Column(String)
+    position = Column(String)
+    nfl_team = Column(String)              # team with most games this season
+    season_year = Column(Integer, nullable=False)
+    format_id = Column(Integer, ForeignKey("scoring_formats.id"), nullable=False)
+    format_name = Column(String)           # denormalized for easy querying
+
+    games_played = Column(Integer)
+    fantasy_points_total = Column(Float)
+    fantasy_ppg = Column(Float)
+
+    def __repr__(self) -> str:
+        return (
+            f"<NFLPlayerSeasonScore {self.player_name!r} "
+            f"{self.season_year} fmt={self.format_name} "
+            f"ppg={self.fantasy_ppg}>"
         )
 
 

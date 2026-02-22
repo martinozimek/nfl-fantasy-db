@@ -63,6 +63,9 @@ from ffnfl.database import (
     NFLPlayerSeason,
     NFLB2S,
     NFLBigBoard,
+    ScoringFormat,
+    NFLPlayerGameLog,
+    NFLPlayerSeasonScore,
     CFBLink,
     QANameCollision,
     QAMissingDraft,
@@ -75,6 +78,10 @@ __all__ = [
     "NFLB2S",
     # Pre-draft market proxy
     "NFLBigBoard",
+    # Scoring system
+    "ScoringFormat",
+    "NFLPlayerGameLog",
+    "NFLPlayerSeasonScore",
     # Cross-database linking
     "CFBLink",
     # QA tables
