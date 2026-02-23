@@ -64,18 +64,30 @@ def _load_cfb_candidates(cfb_db_path: str) -> dict[str, list[dict]]:
     Load all WR/RB/TE players from cfb-prospect-db who have a draft pick record.
 
     Returns a dict keyed by position, each containing a list of:
-        {player_id, full_name, draft_year, position}
+        {player_id, full_name, draft_year, position, last_season_year}
+
+    last_season_year is the most recent CFB season year in our DB for that player.
+    Used as a hard alignment filter: a linked player's last CFB season must precede
+    the NFL draft year (a player with seasons AFTER the draft year is a different person).
     """
     # Import cfb-prospect-db models dynamically (different repo)
     cfb_root = Path(cfb_db_path).parent
     if str(cfb_root) not in sys.path:
         sys.path.insert(0, str(cfb_root))
 
-    from ffdb.database import NFLDraftPick, Player
+    from sqlalchemy import func
+    from ffdb.database import CFBPlayerSeason, NFLDraftPick, Player
     from ffdb.database import get_session as cfb_session
 
     candidates: dict[str, list[dict]] = defaultdict(list)
     with cfb_session(cfb_db_path) as s:
+        # Compute last CFB season year per player — used for alignment filtering
+        last_season_by_player: dict[int, int] = dict(
+            s.query(CFBPlayerSeason.player_id, func.max(CFBPlayerSeason.season_year))
+            .group_by(CFBPlayerSeason.player_id)
+            .all()
+        )
+
         rows = (
             s.query(Player, NFLDraftPick)
             .join(NFLDraftPick, NFLDraftPick.player_id == Player.id)
@@ -91,6 +103,7 @@ def _load_cfb_candidates(cfb_db_path: str) -> dict[str, list[dict]]:
                 "full_name": player.full_name,
                 "draft_year": pick.draft_year,
                 "position": pos,
+                "last_season_year": last_season_by_player.get(player.id),
             })
 
     total = sum(len(v) for v in candidates.values())
@@ -109,18 +122,31 @@ def _fuzzy_match(
     Fuzzy-match a player name against candidates, filtered by position and
     optionally draft_year (±1 year tolerance for early/late declares).
 
+    Also applies a hard alignment filter: a candidate whose last CFB season year
+    is >= the NFL draft year is definitionally a different person and is excluded.
+    (E.g. a player drafted in 2011 cannot have a CFB season in 2011 or later.)
+
     Returns list of (candidate_dict, score) sorted descending by score.
     """
     from rapidfuzz import fuzz, process
 
-    # Filter to same position and approximate draft year (±1 year tolerance).
-    # Do NOT relax to all years — that would match old draft classes against
-    # recent CFB prospects and produce garbage links.
-    filtered = [
-        c for c in candidates
-        if c["position"] == position
-        and (draft_year is None or abs((c["draft_year"] or 0) - (draft_year or 0)) <= 1)
-    ]
+    def _candidate_ok(c: dict) -> bool:
+        # Must match position
+        if c["position"] != position:
+            return False
+        # Draft-year range filter (±1 year tolerance for early/late declares)
+        # Do NOT relax to all years — garbage matches across classes result.
+        if draft_year is not None and abs((c["draft_year"] or 0) - (draft_year or 0)) > 1:
+            return False
+        # Hard alignment filter: candidate's last CFB season must precede draft year.
+        # If we have season data for this player and any of it is >= draft_year,
+        # they are a different person (a current college player, not the NFL player).
+        last_season = c.get("last_season_year")
+        if draft_year is not None and last_season is not None and last_season >= draft_year:
+            return False
+        return True
+
+    filtered = [c for c in candidates if _candidate_ok(c)]
     if not filtered:
         return []
 
@@ -149,11 +175,21 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Report matches without writing to DB.",
     )
+    parser.add_argument(
+        "--wipe", action="store_true",
+        help="Clear all existing CFBLink rows before re-linking (use after fixing the "
+             "alignment filter to ensure stale wrong links are not preserved).",
+    )
     args = parser.parse_args()
 
     db_path = args.db or get_db_path()
     cfb_db_path = args.cfb_db or get_cfb_db_path()
     init_db(db_path)
+
+    if args.wipe:
+        with get_session(db_path) as session:
+            deleted = session.query(CFBLink).delete(synchronize_session=False)
+            logger.info("Wiped %d existing CFBLink rows.", deleted)
 
     # Load cfb-prospect-db candidates
     cfb_candidates = _load_cfb_candidates(cfb_db_path)
