@@ -215,37 +215,43 @@ class CFBLink(Base):
 
 class ScoringFormat(Base):
     """
-    Named fantasy scoring format.
+    Named fantasy scoring format. Formats are binned by the two settings that
+    actually vary across leagues: reception points and TE reception bonus.
 
-    Rules are stored as JSON with the following keys (all numeric):
+    Rules JSON keys (all numeric):
 
-      pass_yards_per_point  yards needed per 1 fantasy point (e.g. 25)
-      pass_td               points per passing TD
-      pass_2pt              points per passing 2-pt conversion
-      interception          points per interception (negative, e.g. -2 or -3)
+      Scoring axes (vary by league — defines the format name):
+        reception             points per reception (0=std, 0.5=half-PPR, 1.0=PPR)
+        te_rec_bonus          extra points per TE reception on top of reception
+                              (0=none, 0.5=te_premium_0.5, 1.0=te_premium_1.0)
 
-      rush_yards_per_point  yards needed per 1 fantasy point (e.g. 10)
-      rush_td               points per rushing TD
-      rush_2pt              points per rushing 2-pt conversion
+      Standard everywhere (fixed across all typical leagues):
+        pass_yards_per_point  yards per 1 pt (default 25)
+        pass_td               points per passing TD (default 6)
+        pass_2pt              points per passing 2-pt conversion (default 2)
+        rush_yards_per_point  yards per 1 pt (default 10)
+        rush_td               points per rushing TD (default 6)
+        rush_2pt              points per rushing 2-pt conversion (default 2)
+        rec_yards_per_point   yards per 1 pt (default 10)
+        rec_td                points per receiving TD (default 6)
+        rec_2pt               points per receiving 2-pt conversion (default 2)
+        special_teams_td      points per special teams TD (default 6)
 
-      reception             points per reception (0=std, 0.5=half-PPR, 1.0=PPR)
-      rec_yards_per_point   yards needed per 1 fantasy point (e.g. 10)
-      rec_td                points per receiving TD
-      rec_2pt               points per receiving 2-pt conversion
-      te_rec_bonus          extra points per TE reception (0=none, 1.0=TE premium)
+    INT and fumble-lost penalties are NOT embedded in formats because they
+    vary too much by league. Instead, raw counts are stored per season in
+    NFLPlayerSeasonScore.fumbles_lost and .interceptions_thrown so each
+    user can apply their own multiplier at query time:
 
-      fumble_lost           points per fumble lost (negative)
-      special_teams_td      points per special teams TD
-      fumble_recovery_td    points per fumble recovery TD
-
-    Use ScoringFormat.parse_rules() to get a dict, and apply_rules() to score a row.
+        adjusted_ppg = fantasy_ppg
+                       + fumbles_lost      / games_played * your_fumble_penalty
+                       + interceptions_thrown / games_played * your_int_penalty
     """
 
     __tablename__ = "scoring_formats"
     __table_args__ = (UniqueConstraint("name", name="uq_scoring_format_name"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False)    # e.g. "ppr", "half_ppr", "dynasty"
+    name = Column(String, nullable=False)    # "standard", "ppr", "te_premium_1.0", etc.
     description = Column(Text)
     rules = Column(Text, nullable=False)     # JSON string
 
@@ -255,19 +261,19 @@ class ScoringFormat(Base):
     @staticmethod
     def compute_points(stats: dict, rules: dict, position: str) -> float:
         """
-        Apply *rules* to a *stats* dict and return fantasy points.
+        Apply *rules* to a *stats* dict and return base fantasy points.
 
-        *stats* keys match NFLPlayerGameLog column names.
-        *position* is needed for TE reception bonus.
+        INT and fumble-lost penalties are deliberately excluded — they are
+        tracked as raw season counts in NFLPlayerSeasonScore for league-specific
+        adjustment. *stats* keys match NFLPlayerGameLog column names.
         """
         r = rules
         pts = 0.0
 
-        # Passing
+        # Passing (INT penalty excluded — tracked separately)
         pts += (stats.get("pass_yards") or 0) / r.get("pass_yards_per_point", 25)
         pts += (stats.get("pass_tds") or 0)   * r.get("pass_td", 6)
         pts += (stats.get("pass_2pt") or 0)   * r.get("pass_2pt", 2)
-        pts += (stats.get("interceptions") or 0) * r.get("interception", -2)
 
         # Rushing
         pts += (stats.get("rush_yards") or 0) / r.get("rush_yards_per_point", 10)
@@ -281,17 +287,11 @@ class ScoringFormat(Base):
         pts += (stats.get("rec_tds") or 0)    * r.get("rec_td", 6)
         pts += (stats.get("rec_2pt") or 0)    * r.get("rec_2pt", 2)
 
-        # TE reception bonus (applied on top of standard PPR points)
+        # TE reception bonus (the main differentiating axis for TE-premium formats)
         if position == "TE":
             pts += recs * r.get("te_rec_bonus", 0.0)
 
-        # Miscellaneous
-        fumbles = (
-            (stats.get("rushing_fumbles_lost") or 0)
-            + (stats.get("receiving_fumbles_lost") or 0)
-            + (stats.get("sack_fumbles_lost") or 0)
-        )
-        pts += fumbles * r.get("fumble_lost", -2)
+        # Special teams TD (standard 6 pts everywhere)
         pts += (stats.get("special_teams_tds") or 0) * r.get("special_teams_td", 6)
 
         return round(pts, 3)
@@ -395,8 +395,15 @@ class NFLPlayerSeasonScore(Base):
     format_name = Column(String)           # denormalized for easy querying
 
     games_played = Column(Integer)
-    fantasy_points_total = Column(Float)
-    fantasy_ppg = Column(Float)
+    fantasy_points_total = Column(Float)   # base points — does NOT include INT/fumble penalties
+    fantasy_ppg = Column(Float)            # base PPG — does NOT include INT/fumble penalties
+
+    # Raw penalty counts — apply your league's multiplier at query time:
+    #   adjusted_ppg = fantasy_ppg
+    #                  + fumbles_lost       / games_played * your_fumble_penalty
+    #                  + interceptions_thrown / games_played * your_int_penalty
+    fumbles_lost = Column(Integer)         # total fumbles lost (rush + rec + sack)
+    interceptions_thrown = Column(Integer) # interceptions (near-zero for WR/RB/TE)
 
     def __repr__(self) -> str:
         return (
@@ -448,10 +455,34 @@ class QAMissingDraft(Base):
 # Database helpers
 # ---------------------------------------------------------------------------
 
+def _migrate(engine) -> None:
+    """
+    Add any missing columns to existing tables (forward-only SQLite migration).
+    Safe to run on a fresh DB or an existing one.
+    """
+    from sqlalchemy import text
+
+    migrations = [
+        # Added when INT/fumble were factored out of scoring formats
+        ("nfl_player_season_scores", "fumbles_lost",          "INTEGER"),
+        ("nfl_player_season_scores", "interceptions_thrown",  "INTEGER"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in migrations:
+            result = conn.execute(text(f"PRAGMA table_info({table})"))
+            existing = {row[1] for row in result}
+            if col not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                ))
+        conn.commit()
+
+
 def init_db(db_path: str) -> None:
-    """Create all tables if they don't exist (idempotent)."""
+    """Create all tables if they don't exist, then apply forward migrations."""
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     engine.dispose()
 
 

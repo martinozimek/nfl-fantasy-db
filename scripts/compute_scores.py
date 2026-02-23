@@ -58,18 +58,31 @@ def _game_log_to_stats(log: NFLPlayerGameLog) -> dict:
         "pass_yards":             log.pass_yards,
         "pass_tds":               log.pass_tds,
         "pass_2pt":               log.pass_2pt,
-        "interceptions":          log.interceptions,
-        "sack_fumbles_lost":      log.sack_fumbles_lost,
         "rush_yards":             log.rush_yards,
         "rush_tds":               log.rush_tds,
         "rush_2pt":               log.rush_2pt,
-        "rushing_fumbles_lost":   log.rushing_fumbles_lost,
         "receptions":             log.receptions,
         "rec_yards":              log.rec_yards,
         "rec_tds":                log.rec_tds,
         "rec_2pt":                log.rec_2pt,
-        "receiving_fumbles_lost": log.receiving_fumbles_lost,
         "special_teams_tds":      log.special_teams_tds,
+    }
+
+
+def _game_log_to_penalty_counts(log: NFLPlayerGameLog) -> dict:
+    """
+    Extract raw penalty counts from a game log row.
+
+    These are NOT included in scoring format computation — they are stored
+    separately so users can apply their own league multipliers at query time.
+    """
+    return {
+        "fumbles_lost": (
+            (log.sack_fumbles_lost or 0)
+            + (log.rushing_fumbles_lost or 0)
+            + (log.receiving_fumbles_lost or 0)
+        ),
+        "interceptions_thrown": (log.interceptions or 0),
     }
 
 
@@ -101,6 +114,7 @@ def compute(
     # Structure: {(nflverse_id, season_year): [game_log_dicts]}
     game_groups: dict[tuple, list[dict]] = defaultdict(list)
     player_meta: dict[tuple, dict] = {}   # first seen metadata per key
+    penalty_totals: dict[tuple, dict] = {}  # {key: {fumbles_lost, interceptions_thrown}}
 
     with get_session(db_path) as session:
         log_query = session.query(NFLPlayerGameLog)
@@ -109,6 +123,12 @@ def compute(
         for log in log_query.all():
             key = (log.nflverse_id, log.season_year)
             game_groups[key].append(_game_log_to_stats(log))
+            # Accumulate penalty counts (format-independent)
+            counts = _game_log_to_penalty_counts(log)
+            if key not in penalty_totals:
+                penalty_totals[key] = {"fumbles_lost": 0, "interceptions_thrown": 0}
+            penalty_totals[key]["fumbles_lost"] += counts["fumbles_lost"]
+            penalty_totals[key]["interceptions_thrown"] += counts["interceptions_thrown"]
             if key not in player_meta:
                 player_meta[key] = {
                     "player_name": log.player_name,
@@ -139,6 +159,7 @@ def compute(
             games = len(game_logs)
             ppg = round(total_pts / games, 3) if games > 0 else 0.0
 
+            penalties = penalty_totals.get((nflverse_id, season_year), {})
             rows_out.append({
                 "nflverse_id": nflverse_id,
                 "season_year": season_year,
@@ -150,6 +171,8 @@ def compute(
                 "games_played": games,
                 "fantasy_points_total": round(total_pts, 3),
                 "fantasy_ppg": ppg,
+                "fumbles_lost": penalties.get("fumbles_lost", 0),
+                "interceptions_thrown": penalties.get("interceptions_thrown", 0),
             })
 
         logger.info(
@@ -195,6 +218,8 @@ def compute(
                 existing.games_played = r["games_played"]
                 existing.fantasy_points_total = r["fantasy_points_total"]
                 existing.fantasy_ppg = r["fantasy_ppg"]
+                existing.fumbles_lost = r["fumbles_lost"]
+                existing.interceptions_thrown = r["interceptions_thrown"]
 
         logger.info("  [%s] Wrote %d rows.", fmt_name, len(rows_out))
 

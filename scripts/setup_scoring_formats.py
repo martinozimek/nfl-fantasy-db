@@ -1,20 +1,23 @@
 """
-Seed the scoring_formats table with standard fantasy formats and the
-user's dynasty league settings.
+Seed the scoring_formats table with standard fantasy formats.
+
+Formats are named and binned by the two settings that actually vary across
+leagues: reception points and TE reception bonus. INT and fumble penalties
+are NOT stored in formats — they are tracked as raw counts in
+NFLPlayerSeasonScore so each user can apply their own multiplier.
 
 Formats included:
-  standard      Classic scoring: no PPR, -2 INT
-  half_ppr      0.5 points per reception
-  ppr           1 point per reception (full PPR)
-  te_premium    Full PPR + 0.5 extra per TE reception (1.5 total for TEs)
-  dynasty       User's custom dynasty league (see below)
+  standard        No reception points, no TE bonus
+  half_ppr        0.5 points per reception
+  ppr             1 point per reception (full PPR)
+  te_premium_0.5  Full PPR + 0.5 extra per TE reception (1.5 total for TEs)
+  te_premium_1.0  Full PPR + 1.0 extra per TE reception (2.0 total for TEs)
 
-Dynasty league settings (user-defined):
-  Passing:   1 pt / 25 yds, 6 pts TD, 2 pts 2-pt, -3 INT
-  Rushing:   1 pt / 10 yds, 6 pts TD, 2 pts 2-pt
-  Receiving: 1 pt / reception (full PPR), 1 pt / 10 yds, 6 pts TD, 2 pts 2-pt
-  TE bonus:  +1 pt per reception (2.0 pts total = TE premium)
-  Misc:      -2 fumble lost, 6 pts special teams TD, 6 pts fumble recovery TD
+All other scoring axes are fixed at standard values everywhere:
+  Pass: 1 pt / 25 yds, 6 pts TD, 2 pts 2-pt
+  Rush: 1 pt / 10 yds, 6 pts TD, 2 pts 2-pt
+  Rec:  1 pt / 10 yds, 6 pts TD, 2 pts 2-pt
+  Special teams TD: 6 pts
 
 Usage:
     python scripts/setup_scoring_formats.py
@@ -49,7 +52,6 @@ def _rules(
     pass_yards_per_point: float = 25,
     pass_td: float = 6,
     pass_2pt: float = 2,
-    interception: float = -2,
     rush_yards_per_point: float = 10,
     rush_td: float = 6,
     rush_2pt: float = 2,
@@ -58,26 +60,27 @@ def _rules(
     rec_td: float = 6,
     rec_2pt: float = 2,
     te_rec_bonus: float = 0.0,
-    fumble_lost: float = -2,
     special_teams_td: float = 6,
-    fumble_recovery_td: float = 6,
 ) -> str:
+    """
+    Build a scoring rules JSON string.
+
+    INT and fumble-lost penalties are intentionally absent — they are stored
+    as raw counts in NFLPlayerSeasonScore for league-specific adjustment.
+    """
     return json.dumps({
         "pass_yards_per_point": pass_yards_per_point,
-        "pass_td": pass_td,
-        "pass_2pt": pass_2pt,
-        "interception": interception,
+        "pass_td":              pass_td,
+        "pass_2pt":             pass_2pt,
         "rush_yards_per_point": rush_yards_per_point,
-        "rush_td": rush_td,
-        "rush_2pt": rush_2pt,
-        "reception": reception,
-        "rec_yards_per_point": rec_yards_per_point,
-        "rec_td": rec_td,
-        "rec_2pt": rec_2pt,
-        "te_rec_bonus": te_rec_bonus,
-        "fumble_lost": fumble_lost,
-        "special_teams_td": special_teams_td,
-        "fumble_recovery_td": fumble_recovery_td,
+        "rush_td":              rush_td,
+        "rush_2pt":             rush_2pt,
+        "reception":            reception,
+        "rec_yards_per_point":  rec_yards_per_point,
+        "rec_td":               rec_td,
+        "rec_2pt":              rec_2pt,
+        "te_rec_bonus":         te_rec_bonus,
+        "special_teams_td":     special_teams_td,
     })
 
 
@@ -85,61 +88,58 @@ FORMATS = [
     {
         "name": "standard",
         "description": (
-            "Classic standard scoring. No reception points. "
-            "Pass: 1/25 yds, 6 TD, -2 INT. "
+            "Classic standard scoring. No reception points, no TE bonus. "
+            "Pass: 1/25 yds, 6 TD. "
             "Rush: 1/10 yds, 6 TD. "
             "Rec: 1/10 yds, 6 TD. "
-            "Fumble lost: -2."
+            "INT and fumble penalties applied at query time."
         ),
         "rules": _rules(reception=0.0),
     },
     {
         "name": "half_ppr",
         "description": (
-            "Half-PPR: 0.5 points per reception. "
-            "Pass: 1/25 yds, 6 TD, -2 INT. "
+            "Half-PPR: 0.5 points per reception, no TE bonus. "
+            "Pass: 1/25 yds, 6 TD. "
             "Rush: 1/10 yds, 6 TD. "
             "Rec: 0.5/rec, 1/10 yds, 6 TD. "
-            "Fumble lost: -2."
+            "INT and fumble penalties applied at query time."
         ),
         "rules": _rules(reception=0.5),
     },
     {
         "name": "ppr",
         "description": (
-            "Full PPR: 1 point per reception. "
-            "Pass: 1/25 yds, 6 TD, -2 INT. "
+            "Full PPR: 1 point per reception, no TE bonus. "
+            "Pass: 1/25 yds, 6 TD. "
             "Rush: 1/10 yds, 6 TD. "
             "Rec: 1/rec, 1/10 yds, 6 TD. "
-            "Fumble lost: -2."
+            "INT and fumble penalties applied at query time."
         ),
         "rules": _rules(reception=1.0),
     },
     {
-        "name": "te_premium",
+        "name": "te_premium_0.5",
         "description": (
             "Full PPR + 0.5 TE reception bonus (TEs earn 1.5 pts/rec). "
-            "All other rules same as PPR. Fumble lost: -2."
+            "All other rules same as PPR. "
+            "INT and fumble penalties applied at query time."
         ),
         "rules": _rules(reception=1.0, te_rec_bonus=0.5),
     },
     {
-        "name": "dynasty",
+        "name": "te_premium_1.0",
         "description": (
-            "Custom dynasty league: "
-            "Pass: 1/25 yds, 6 TD, 2 pts 2-pt, -3 INT. "
-            "Rush: 1/10 yds, 6 TD, 2 pts 2-pt. "
-            "Rec: 1/rec (PPR), 1/10 yds, 6 TD, 2 pts 2-pt. "
-            "TE: +1 per reception (2.0 total = TE premium). "
-            "Fumble lost: -2. Special teams TD: 6. Fumble recovery TD: 6."
+            "Full PPR + 1.0 TE reception bonus (TEs earn 2.0 pts/rec). "
+            "All other rules same as PPR. "
+            "INT and fumble penalties applied at query time."
         ),
-        "rules": _rules(
-            interception=-3,
-            reception=1.0,
-            te_rec_bonus=1.0,
-        ),
+        "rules": _rules(reception=1.0, te_rec_bonus=1.0),
     },
 ]
+
+# Old format names that should be removed if they exist (renamed in redesign)
+_OBSOLETE_NAMES = {"te_premium", "dynasty"}
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ FORMATS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Seed scoring_formats table with standard and dynasty formats."
+        description="Seed scoring_formats table with standard and TE-premium formats."
     )
     parser.add_argument("--db", type=str, default=None)
     parser.add_argument(
@@ -166,14 +166,26 @@ def main() -> None:
         if not rows:
             print("No scoring formats in DB. Run without --list to seed.")
         else:
-            print(f"\n{'ID':<4} {'Name':<16} Description")
+            print(f"\n{'ID':<4} {'Name':<20} Description")
             print("-" * 80)
             for r in rows:
-                print(f"{r.id:<4} {r.name:<16} {r.description[:60] if r.description else ''}")
+                print(f"{r.id:<4} {r.name:<20} {r.description[:60] if r.description else ''}")
             print()
         return
 
     with get_session(db_path) as session:
+        # Remove obsolete format names from previous schema versions
+        removed = 0
+        for old_name in _OBSOLETE_NAMES:
+            old = session.query(ScoringFormat).filter(ScoringFormat.name == old_name).first()
+            if old:
+                session.delete(old)
+                removed += 1
+                logger.info("  Removed obsolete format: %s", old_name)
+        if removed:
+            logger.info("  Removed %d obsolete format(s).", removed)
+
+        # Upsert current formats
         for fmt in FORMATS:
             existing = (
                 session.query(ScoringFormat)
@@ -196,10 +208,8 @@ def main() -> None:
         for r in session.query(ScoringFormat).order_by(ScoringFormat.id).all():
             rules = r.parse_rules()
             print(
-                f"  {r.name:<16} rec={rules['reception']:.1f}  "
-                f"te_bonus={rules['te_rec_bonus']:.1f}  "
-                f"INT={rules['interception']}  "
-                f"fumble={rules['fumble_lost']}"
+                f"  {r.name:<20} rec={rules['reception']:.1f}  "
+                f"te_bonus={rules['te_rec_bonus']:.1f}"
             )
 
 
